@@ -1,4 +1,5 @@
 import os
+import json
 import logging
 from telegram import Update
 from telegram.ext import Application, MessageHandler, filters, ContextTypes
@@ -7,16 +8,16 @@ from datetime import datetime
 from urllib.parse import quote
 
 # Konfigurasi Bot
-TOKEN = "8186303125:AAEU3cKzbllqtiot55iRbDf0Q5yK44EelGA"
+TOKEN = os.environ.get("TELEGRAM_TOKEN", "8186303125:AAEU3cKzbllqtiot55iRbDf0Q5yK44EelGA")
 BOT_USERNAME = "@StoreDB_airdropbot"
 
 # Konfigurasi Database
 DB_CONFIG = {
-    "user": "neondb_owner",
-    "password": "npg_ntWwHqA9dKI2",
-    "database": "neondb",
-    "host": "ep-lucky-shape-a14jznh2-pooler.ap-southeast-1.aws.neon.tech",
-    "port": "5432",
+    "user": os.environ.get("DB_USER", "neondb_owner"),
+    "password": os.environ.get("DB_PASSWORD", "npg_ntWwHqA9dKI2"),
+    "database": os.environ.get("DB_NAME", "neondb"),
+    "host": os.environ.get("DB_HOST", "ep-lucky-shape-a14jznh2-pooler.ap-southeast-1.aws.neon.tech"),
+    "port": os.environ.get("DB_PORT", "5432"),
     "ssl": "require"
 }
 
@@ -27,9 +28,9 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-async def create_db_pool():
+async def create_db_connection():
     try:
-        pool = await asyncpg.create_pool(
+        connection = await asyncpg.connect(
             user=DB_CONFIG['user'],
             password=DB_CONFIG['password'],
             database=DB_CONFIG['database'],
@@ -38,23 +39,22 @@ async def create_db_pool():
             ssl=DB_CONFIG['ssl']
         )
         logger.info("Koneksi database berhasil dibuat")
-        return pool
+        return connection
     except Exception as e:
         logger.error(f"Gagal membuat koneksi database: {e}")
         raise
 
-async def save_message_to_db(message_text: str, db_pool, source_link=None, is_forwarded=False):
+async def save_message_to_db(message_text: str, connection, source_link=None, is_forwarded=False):
     try:
-        async with db_pool.acquire() as connection:
-            await connection.execute(
-                """INSERT INTO messages 
-                (message, source_link, is_forwarded) 
-                VALUES ($1, $2, $3)""",
-                message_text,
-                source_link,
-                is_forwarded
-            )
-            logger.info(f"Pesan disimpan: {message_text[:100]}... | Link: {source_link}")
+        await connection.execute(
+            """INSERT INTO messages 
+            (message, source_link, is_forwarded) 
+            VALUES ($1, $2, $3)""",
+            message_text,
+            source_link,
+            is_forwarded
+        )
+        logger.info(f"Pesan disimpan: {message_text[:100]}... | Link: {source_link}")
     except Exception as e:
         logger.error(f"Gagal menyimpan pesan ke database: {e}")
         raise
@@ -106,10 +106,12 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     logger.info(f'User ({message.chat.id}) in {message_type}: "{message_text[:100]}..." | Forwarded: {is_forwarded}')
 
     if message_type == 'private':
+        connection = None
         try:
+            connection = await create_db_connection()
             await save_message_to_db(
                 message_text, 
-                context.application.db_pool,
+                connection,
                 source_link,
                 is_forwarded
             )
@@ -122,29 +124,46 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         except Exception as e:
             await message.reply_text("Maaf, terjadi kesalahan saat menyimpan pesan.")
             logger.error(f"Error: {e}")
+        finally:
+            if connection:
+                await connection.close()
     else:
         await message.reply_text("Silakan kirim pesan secara private ke bot ini.")
 
 async def error(update: Update, context: ContextTypes.DEFAULT_TYPE):
     logger.error(f'Update {update} caused error {context.error}')
 
-async def post_init(application: Application):
-    """Fungsi yang dijalankan setelah inisialisasi aplikasi"""
-    application.db_pool = await create_db_pool()
+# Vercel handler function
+async def handler(request):
+    if request.method == "POST":
+        try:
+            # Parse JSON body
+            body = await request.json()
+            
+            # Create application
+            application = Application.builder().token(TOKEN).build()
+            
+            # Add handlers
+            application.add_handler(MessageHandler(
+                filters.TEXT | filters.CAPTION | filters.PHOTO, 
+                handle_message
+            ))
+            application.add_error_handler(error)
+            
+            # Process update
+            update = Update.de_json(body, application.bot)
+            await application.initialize()
+            await application.process_update(update)
+            await application.shutdown()
+            
+            return {"statusCode": 200, "body": "OK"}
+        except Exception as e:
+            logger.error(f"Error processing webhook: {e}")
+            return {"statusCode": 500, "body": str(e)}
+    else:
+        return {"statusCode": 405, "body": "Method not allowed"}
 
-if __name__ == '__main__':
-    # Membuat aplikasi dengan post_init handler
-    app = Application.builder() \
-        .token(TOKEN) \
-        .post_init(post_init) \
-        .build()
-
-    # Handlers - menerima semua pesan yang mengandung teks atau caption
-    app.add_handler(MessageHandler(
-        filters.TEXT | filters.CAPTION | filters.PHOTO, 
-        handle_message
-    ))
-    app.add_error_handler(error)
-
-    logger.info(f'Bot sedang berjalan... {BOT_USERNAME}')
-    app.run_polling()
+# For Vercel
+def handler_func(request):
+    import asyncio
+    return asyncio.run(handler(request))
