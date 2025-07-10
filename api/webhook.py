@@ -1,169 +1,44 @@
-import os
-import json
-import logging
-from telegram import Update
-from telegram.ext import Application, MessageHandler, filters, ContextTypes
-import asyncpg
-from datetime import datetime
-from urllib.parse import quote
+import requests
+import sys
 
-# Konfigurasi Bot
-TOKEN = os.environ.get("TELEGRAM_TOKEN", "8186303125:AAEU3cKzbllqtiot55iRbDf0Q5yK44EelGA")
-BOT_USERNAME = "@StoreDB_airdropbot"
+# Ganti dengan token bot Anda
+TOKEN = "8186303125:AAEU3cKzbllqtiot55iRbDf0Q5yK44EelGA"
 
-# Konfigurasi Database
-DB_CONFIG = {
-    "user": os.environ.get("DB_USER", "neondb_owner"),
-    "password": os.environ.get("DB_PASSWORD", "npg_ntWwHqA9dKI2"),
-    "database": os.environ.get("DB_NAME", "neondb"),
-    "host": os.environ.get("DB_HOST", "ep-lucky-shape-a14jznh2-pooler.ap-southeast-1.aws.neon.tech"),
-    "port": os.environ.get("DB_PORT", "5432"),
-    "ssl": "require"
-}
+# Ganti dengan URL Vercel deployment Anda
+WEBHOOK_URL = "https://your-vercel-domain.vercel.app/api/webhook"
 
-# Setup logging
-logging.basicConfig(
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
-    level=logging.INFO
-)
-logger = logging.getLogger(__name__)
-
-async def create_db_connection():
-    try:
-        connection = await asyncpg.connect(
-            user=DB_CONFIG['user'],
-            password=DB_CONFIG['password'],
-            database=DB_CONFIG['database'],
-            host=DB_CONFIG['host'],
-            port=DB_CONFIG['port'],
-            ssl=DB_CONFIG['ssl']
-        )
-        logger.info("Koneksi database berhasil dibuat")
-        return connection
-    except Exception as e:
-        logger.error(f"Gagal membuat koneksi database: {e}")
-        raise
-
-async def save_message_to_db(message_text: str, connection, source_link=None, is_forwarded=False):
-    try:
-        await connection.execute(
-            """INSERT INTO messages 
-            (message, source_link, is_forwarded) 
-            VALUES ($1, $2, $3)""",
-            message_text,
-            source_link,
-            is_forwarded
-        )
-        logger.info(f"Pesan disimpan: {message_text[:100]}... | Link: {source_link}")
-    except Exception as e:
-        logger.error(f"Gagal menyimpan pesan ke database: {e}")
-        raise
-
-def generate_group_link(chat_id, message_id=None):
-    """Generate link grup/channel Telegram"""
-    base_url = "https://t.me/c/"
-    chat_id_str = str(chat_id).replace('-100', '')
-    if message_id:
-        return f"{base_url}{chat_id_str}/{message_id}"
-    return f"{base_url}{chat_id_str}"
-
-async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    message = update.message
-    if not message:
-        return
-
-    message_type = message.chat.type
+def set_webhook():
+    url = f"https://api.telegram.org/bot{TOKEN}/setWebhook"
+    data = {
+        "url": WEBHOOK_URL,
+        "allowed_updates": ["message"]
+    }
     
-    # Ambil teks pesan (baik dari text biasa atau caption media)
-    message_text = message.text or message.caption
-    
-    # Jika tidak ada teks sama sekali (hanya gambar tanpa caption)
-    if not message_text:
-        await message.reply_text("Maaf, saya hanya menyimpan teks. Gambar tidak disimpan.")
-        return
+    response = requests.post(url, json=data)
+    print(f"Status: {response.status_code}")
+    print(f"Response: {response.json()}")
 
-    # Cek jika pesan diforward dan dapatkan link sumber
-    source_link = None
-    is_forwarded = False
-    
-    if hasattr(message, 'forward_origin'):
-        if message.forward_origin.type == "channel":
-            try:
-                chat_id = message.forward_origin.chat.id
-                message_id = message.forward_origin.message_id
-                source_link = generate_group_link(chat_id, message_id)
-                is_forwarded = True
-            except Exception as e:
-                logger.error(f"Gagal generate link channel: {e}")
-        elif message.forward_origin.type == "chat":
-            try:
-                chat_id = message.forward_origin.sender_chat.id
-                source_link = generate_group_link(chat_id)
-                is_forwarded = True
-            except Exception as e:
-                logger.error(f"Gagal generate link grup: {e}")
+def delete_webhook():
+    url = f"https://api.telegram.org/bot{TOKEN}/deleteWebhook"
+    response = requests.post(url)
+    print(f"Status: {response.status_code}")
+    print(f"Response: {response.json()}")
 
-    logger.info(f'User ({message.chat.id}) in {message_type}: "{message_text[:100]}..." | Forwarded: {is_forwarded}')
+def get_webhook_info():
+    url = f"https://api.telegram.org/bot{TOKEN}/getWebhookInfo"
+    response = requests.get(url)
+    print(f"Status: {response.status_code}")
+    print(f"Response: {response.json()}")
 
-    if message_type == 'private':
-        connection = None
-        try:
-            connection = await create_db_connection()
-            await save_message_to_db(
-                message_text, 
-                connection,
-                source_link,
-                is_forwarded
-            )
-            
-            reply_text = "Pesan teks Anda telah disimpan ke database!"
-            if is_forwarded and source_link:
-                reply_text += f"\n\nLink sumber: {source_link}"
-                
-            await message.reply_text(reply_text)
-        except Exception as e:
-            await message.reply_text("Maaf, terjadi kesalahan saat menyimpan pesan.")
-            logger.error(f"Error: {e}")
-        finally:
-            if connection:
-                await connection.close()
+if __name__ == "__main__":
+    if len(sys.argv) > 1:
+        if sys.argv[1] == "set":
+            set_webhook()
+        elif sys.argv[1] == "delete":
+            delete_webhook()
+        elif sys.argv[1] == "info":
+            get_webhook_info()
+        else:
+            print("Usage: python setup_webhook.py [set|delete|info]")
     else:
-        await message.reply_text("Silakan kirim pesan secara private ke bot ini.")
-
-async def error(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    logger.error(f'Update {update} caused error {context.error}')
-
-# Vercel handler function
-async def handler(request):
-    if request.method == "POST":
-        try:
-            # Parse JSON body
-            body = await request.json()
-            
-            # Create application
-            application = Application.builder().token(TOKEN).build()
-            
-            # Add handlers
-            application.add_handler(MessageHandler(
-                filters.TEXT | filters.CAPTION | filters.PHOTO, 
-                handle_message
-            ))
-            application.add_error_handler(error)
-            
-            # Process update
-            update = Update.de_json(body, application.bot)
-            await application.initialize()
-            await application.process_update(update)
-            await application.shutdown()
-            
-            return {"statusCode": 200, "body": "OK"}
-        except Exception as e:
-            logger.error(f"Error processing webhook: {e}")
-            return {"statusCode": 500, "body": str(e)}
-    else:
-        return {"statusCode": 405, "body": "Method not allowed"}
-
-# For Vercel
-def handler_func(request):
-    import asyncio
-    return asyncio.run(handler(request))
+        get_webhook_info()
